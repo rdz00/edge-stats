@@ -7,10 +7,6 @@ const DIRS = ["up", "down", "any"] as const;
 const REF_SESSIONS = ["london", "asia"] as const;
 const LEVEL_SIDES = ["high", "low"] as const;
 
-function refCol(ref: string, side: string, col: string): string {
-  return `f.${ref}_${side}_${col}`;
-}
-
 
 function orCol(minutes: number, col: string): string {
   return `f.or${minutes}_${col}`;
