@@ -92,6 +92,11 @@ export function orColumns(window: number): ColumnSpec[] {
     { name: `${p}break_min`, type: "INTEGER" },
     { name: `${p}false_break`, type: "BOOLEAN" },
     { name: `${p}broke_both`, type: "BOOLEAN" },
+    { name: `${p}retested`, type: "BOOLEAN" },
+    { name: `${p}retest_side`, type: "VARCHAR" },
+    { name: `${p}retest_min`, type: "INTEGER" },
+    { name: `${p}retest_mfe_r`, type: "DOUBLE" },
+    { name: `${p}retest_mae_r`, type: "DOUBLE" },
     { name: `${p}ext_up_r`, type: "DOUBLE" },
     { name: `${p}ext_dn_r`, type: "DOUBLE" },
   ];
