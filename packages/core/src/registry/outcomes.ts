@@ -145,6 +145,71 @@ export const outcomes: OutcomeDef[] = [
   },
   {
     kind: "outcome",
+    name: "orbRetest",
+    title: "Opening range first-break retest",
+    doc: "Of the sessions whose opening range first broke in the given direction, how often price later returned to the broken boundary. The breakout bar itself is excluded from retest detection.",
+    args: [
+      { name: "window", type: "duration", required: true, doc: "Opening-range window" },
+      {
+        name: "dir",
+        type: "enum",
+        values: DIRS,
+        default: "any",
+        doc: "Direction of the first break",
+      },
+    ],
+    eligibility: (a, ctx) => {
+      const w = requireWindow(a.window as number, ctx);
+      const dir = a.dir as string;
+      if (dir === "any") return `${orCol(w, "first_break")} IN ('up', 'down')`;
+      return `${orCol(w, "first_break")} = '${dir}'`;
+    },
+    success: (a, ctx) => `${orCol(requireWindow(a.window as number, ctx), "retested")}`,
+    value: {
+      sql: (a, ctx) => orCol(requireWindow(a.window as number, ctx), "retest_min"),
+      unit: "minutes",
+      doc: "Minutes from the session open to the first retest, among sessions that retested.",
+    },
+    examples: ["orbRetest(5m, up)", "orbRetest(15m) WHERE NOT eventDay('FOMC')"],
+  },
+  {
+    kind: "outcome",
+    name: "orbRetestMfeHit",
+    title: "Opening range retest favorable excursion hit",
+    doc: "Of opening-range breakouts that produced a first retest, how often post-retest favorable excursion reached at least r opening-range widths from the broken boundary.",
+    args: [
+      { name: "window", type: "duration", required: true, doc: "Opening-range window" },
+      {
+        name: "r",
+        type: "number",
+        required: true,
+        doc: "Favorable excursion target in opening-range multiples",
+      },
+      {
+        name: "dir",
+        type: "enum",
+        values: DIRS,
+        default: "any",
+        doc: "Direction of the first break / retest",
+      },
+    ],
+    eligibility: (a, ctx) => {
+      const w = requireWindow(a.window as number, ctx);
+      const dir = a.dir as string;
+      if (dir === "any") return `${orCol(w, "retested")} AND ${orCol(w, "retest_mfe_r")} IS NOT NULL`;
+      return `${orCol(w, "retested")} AND ${orCol(w, "retest_side")} = '${dir}' AND ${orCol(w, "retest_mfe_r")} IS NOT NULL`;
+    },
+    success: (a, ctx) =>
+      `${orCol(requireWindow(a.window as number, ctx), "retest_mfe_r")} >= ${sqlNum(a.r as number)}`,
+    value: {
+      sql: (a, ctx) => orCol(requireWindow(a.window as number, ctx), "retest_mfe_r"),
+      unit: "r",
+      doc: "Post-retest favorable excursion in opening-range multiples.",
+    },
+    examples: ["orbRetestMfeHit(5m, 0.5, up)", "orbRetestMfeHit(5m, 1)"],
+  },
+  {
+    kind: "outcome",
     name: "orbFalseBreak",
     title: "Opening range false break",
     doc: "Of the sessions whose opening range first broke in the given direction, how often that break failed (closed back inside the range or beyond the opposite side).",
