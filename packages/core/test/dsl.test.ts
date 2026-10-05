@@ -132,6 +132,21 @@ describe("compilation against the registry", () => {
     expect(compiled.normalizedDsl).toContain("WHERE");
   });
 
+  it("compiles ORB retest outcomes and predicates", () => {
+    const retest = compileQuery(parseDsl("orbRetest(5m, up)"), ctx);
+    expect(retest.eligibilitySql).toContain("or5_first_break");
+    expect(retest.successSql).toContain("or5_retested");
+
+    const mfe = compileQuery(
+      parseDsl("orbRetestMfeHit(5m, 1, up) WHERE orbRetested(5m, up)"),
+      ctx,
+    );
+    expect(mfe.eligibilitySql).toContain("or5_retest_mfe_r");
+    expect(mfe.successSql).toContain("or5_retest_mfe_r");
+    expect(mfe.whereSql).toContain("or5_retested");
+    expect(mfe.whereSql).toContain("or5_retest_side");
+  });
+
   it("treats bare boolean fields as predicates and rejects bare numerics", () => {
     expect(compileQuery(parseDsl("closeGreen WHERE insideDay"), ctx).whereSql).toContain(
       "f.inside_day",
