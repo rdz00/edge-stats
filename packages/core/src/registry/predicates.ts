@@ -4,6 +4,14 @@ import { requireWindow } from "./types";
 
 const DIRS = ["up", "down", "any"] as const;
 
+const REF_SESSIONS = ["london", "asia"] as const;
+const LEVEL_SIDES = ["high", "low"] as const;
+
+function refCol(ref: string, side: string, col: string): string {
+  return `f.${ref}_${side}_${col}`;
+}
+
+
 function orCol(minutes: number, col: string): string {
   return `f.or${minutes}_${col}`;
 }
@@ -33,6 +41,18 @@ export const predicates: PredicateDef[] = [
     doc: "The session opened exactly at the prior session's close (or gap data is unavailable).",
     args: [],
     sql: () => "(f.gap_dir = 'none' OR f.gap_dir IS NULL)",
+  },
+  {
+    kind: "predicate",
+    name: "referenceLevelTouched",
+    title: "Reference-session level touched",
+    doc: "The target session touched the selected London/Asia high or low after that reference session had fully completed. Highs are only eligible when the target opened at or below the high; lows only when it opened at or above the low.",
+    args: [
+      { name: "ref", type: "enum", values: REF_SESSIONS, required: true, doc: "Reference session" },
+      { name: "side", type: "enum", values: LEVEL_SIDES, required: true, doc: "Reference high or low" },
+    ],
+    sql: (a) => `f.${String(a.ref)}_touched_${String(a.side)}`,
+    examples: ["closeGreen WHERE referenceLevelTouched(london, low)"],
   },
   {
     kind: "predicate",
