@@ -132,6 +132,40 @@ describe("compilation against the registry", () => {
     expect(compiled.normalizedDsl).toContain("WHERE");
   });
 
+  it("compiles ORB retest outcomes and predicates", () => {
+    const retest = compileQuery(parseDsl("orbRetest(5m, up)"), ctx);
+    expect(retest.eligibilitySql).toContain("or5_first_break");
+    expect(retest.successSql).toContain("or5_retested");
+
+    const mfe = compileQuery(
+      parseDsl("orbRetestMfeHit(5m, 1, up) WHERE orbRetested(5m, up)"),
+      ctx,
+    );
+    expect(mfe.eligibilitySql).toContain("or5_retest_mfe_r");
+    expect(mfe.successSql).toContain("or5_retest_mfe_r");
+    expect(mfe.whereSql).toContain("or5_retested");
+    expect(mfe.whereSql).toContain("or5_retest_side");
+  });
+
+  it("compiles reference-session level outcomes and predicates", () => {
+    const touch = compileQuery(parseDsl("referenceLevelTouch(london, low)"), ctx);
+    expect(touch.eligibilitySql).toContain("london_low");
+    expect(touch.successSql).toContain("london_touched_low");
+
+    const mfe = compileQuery(
+      parseDsl(
+        "referenceLevelMfeHit(asia, high, 0.5) WHERE referenceLevelTouched(asia, high)",
+      ),
+      ctx,
+    );
+    expect(mfe.eligibilitySql).toContain("asia_high_mfe_r");
+    expect(mfe.successSql).toContain("asia_high_mfe_r");
+    expect(mfe.whereSql).toContain("asia_touched_high");
+
+    const mae = compileQuery(parseDsl("referenceLevelMaeHit(london, low, 0.25)"), ctx);
+    expect(mae.successSql).toContain("london_low_mae_r");
+  });
+
   it("treats bare boolean fields as predicates and rejects bare numerics", () => {
     expect(compileQuery(parseDsl("closeGreen WHERE insideDay"), ctx).whereSql).toContain(
       "f.inside_day",

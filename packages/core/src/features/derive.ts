@@ -25,7 +25,7 @@ import { randomUUID } from "node:crypto";
 import { DateTime } from "luxon";
 import type { SessionResolver } from "../calendar";
 import type { EdgeStatsConfig, SymbolConfig } from "../config";
-import { parseTfMs } from "../config";
+import { defaultSessionKey, parseTfMs } from "../config";
 import { derivableSessionKeys } from "../calendar/sessions";
 import type { Store } from "../store/store";
 import { sqlNum, sqlPath, sqlStr } from "../util/sql";
@@ -62,6 +62,9 @@ interface OrRow {
   dnTs: number | null;
   postHigh: number | null;
   postLow: number | null;
+  retestTs: number | null;
+  retestPostHigh: number | null;
+  retestPostLow: number | null;
 }
 
 interface FvgZone {
@@ -132,8 +135,130 @@ export async function deriveFeatures(
       const count = await deriveOne(store, symbol, sessionKey, windows, resolver, log);
       summaries.push({ symbol: symbol.symbol, sessionKey, sessions: count });
     }
+    await deriveReferenceSessionLevels(store, symbol, log);
   }
   return summaries;
+}
+
+async function deriveReferenceSessionLevels(
+  store: Store,
+  symbol: SymbolConfig,
+  log: (msg: string) => void,
+): Promise<void> {
+  const targetSession = defaultSessionKey(symbol);
+  const sessionKeys = new Set(derivableSessionKeys(symbol));
+  const refs = ["london", "asia"] as const;
+  const sym = sqlStr(symbol.symbol);
+  const tf = sqlStr(symbol.tf);
+
+  for (const ref of refs) {
+    if (!sessionKeys.has(ref) || !sessionKeys.has(targetSession) || ref === targetSession) continue;
+
+    const prefix = ref;
+    await store.run(`
+      CREATE OR REPLACE TEMP TABLE _ref_base AS
+      SELECT t.trade_date,
+        t.start_ts AS target_start_ts,
+        t.end_ts AS target_end_ts,
+        t.open AS target_open,
+        r.high AS ref_high,
+        r.low AS ref_low,
+        (r.high - r.low) AS ref_range
+      FROM session_features t
+      JOIN session_features r
+        ON r.symbol = t.symbol
+       AND r.trade_date = t.trade_date
+       AND r.session_key = ${sqlStr(ref)}
+      WHERE t.symbol = ${sym}
+        AND t.session_key = ${sqlStr(targetSession)}
+        AND t.complete
+        AND r.complete
+        AND r.end_ts <= t.start_ts
+        AND r.high IS NOT NULL
+        AND r.low IS NOT NULL
+        AND r.high > r.low
+    `);
+
+    await store.run(`
+      CREATE OR REPLACE TEMP TABLE _ref_touch AS
+      SELECT rb.*,
+        min(b.ts) FILTER (
+          WHERE rb.target_open <= rb.ref_high AND b.high >= rb.ref_high
+        ) AS high_touch_ts,
+        min(b.ts) FILTER (
+          WHERE rb.target_open >= rb.ref_low AND b.low <= rb.ref_low
+        ) AS low_touch_ts
+      FROM _ref_base rb
+      JOIN bars b
+        ON b.symbol = ${sym}
+       AND b.tf = ${tf}
+       AND b.ts >= rb.target_start_ts
+       AND b.ts < rb.target_end_ts
+      GROUP BY rb.trade_date, rb.target_start_ts, rb.target_end_ts, rb.target_open,
+               rb.ref_high, rb.ref_low, rb.ref_range
+    `);
+
+    // Start excursions on the bar AFTER the touch bar to avoid intrabar
+    // sequencing assumptions inside a 1-minute OHLC candle.
+    await store.run(`
+      CREATE OR REPLACE TEMP TABLE _ref_exc AS
+      SELECT rt.trade_date,
+        max(b.high) FILTER (WHERE rt.high_touch_ts IS NOT NULL AND b.ts > rt.high_touch_ts) AS high_post_high,
+        min(b.low) FILTER (WHERE rt.high_touch_ts IS NOT NULL AND b.ts > rt.high_touch_ts) AS high_post_low,
+        max(b.high) FILTER (WHERE rt.low_touch_ts IS NOT NULL AND b.ts > rt.low_touch_ts) AS low_post_high,
+        min(b.low) FILTER (WHERE rt.low_touch_ts IS NOT NULL AND b.ts > rt.low_touch_ts) AS low_post_low
+      FROM _ref_touch rt
+      JOIN bars b
+        ON b.symbol = ${sym}
+       AND b.tf = ${tf}
+       AND b.ts >= rt.target_start_ts
+       AND b.ts < rt.target_end_ts
+      GROUP BY rt.trade_date
+    `);
+
+    await store.run(`
+      UPDATE session_features AS f
+      SET ${prefix}_high = rt.ref_high,
+          ${prefix}_low = rt.ref_low,
+          ${prefix}_range = rt.ref_range,
+          ${prefix}_touched_high = rt.high_touch_ts IS NOT NULL,
+          ${prefix}_touch_high_min = CASE
+            WHEN rt.high_touch_ts IS NULL THEN NULL
+            ELSE floor((rt.high_touch_ts - rt.target_start_ts) / 60000)::INT
+          END,
+          ${prefix}_high_mfe_r = CASE
+            WHEN rt.high_touch_ts IS NULL OR re.high_post_low IS NULL THEN NULL
+            ELSE round(greatest(0, rt.ref_high - re.high_post_low) / rt.ref_range, 6)
+          END,
+          ${prefix}_high_mae_r = CASE
+            WHEN rt.high_touch_ts IS NULL OR re.high_post_high IS NULL THEN NULL
+            ELSE round(greatest(0, re.high_post_high - rt.ref_high) / rt.ref_range, 6)
+          END,
+          ${prefix}_touched_low = rt.low_touch_ts IS NOT NULL,
+          ${prefix}_touch_low_min = CASE
+            WHEN rt.low_touch_ts IS NULL THEN NULL
+            ELSE floor((rt.low_touch_ts - rt.target_start_ts) / 60000)::INT
+          END,
+          ${prefix}_low_mfe_r = CASE
+            WHEN rt.low_touch_ts IS NULL OR re.low_post_high IS NULL THEN NULL
+            ELSE round(greatest(0, re.low_post_high - rt.ref_low) / rt.ref_range, 6)
+          END,
+          ${prefix}_low_mae_r = CASE
+            WHEN rt.low_touch_ts IS NULL OR re.low_post_low IS NULL THEN NULL
+            ELSE round(greatest(0, rt.ref_low - re.low_post_low) / rt.ref_range, 6)
+          END
+      FROM _ref_touch rt
+      LEFT JOIN _ref_exc re USING (trade_date)
+      WHERE f.symbol = ${sym}
+        AND f.session_key = ${sqlStr(targetSession)}
+        AND f.trade_date = rt.trade_date
+    `);
+
+    await store.run(
+      "DROP TABLE IF EXISTS _ref_base; DROP TABLE IF EXISTS _ref_touch; DROP TABLE IF EXISTS _ref_exc",
+    );
+    log(`derived ${ref} reference levels for ${symbol.symbol} ${targetSession}`);
+  }
 }
 
 async function deriveOne(
@@ -226,10 +351,62 @@ async function deriveOne(
     GROUP BY s.trade_date
   `);
 
+  // S2b: first retest of the side that broke first. The break bar itself
+  // is excluded so a single wide breakout candle does not count as its own retest.
+  const orRetestSelects = windows
+    .map(
+      (w) => `
+      min(b.ts) FILTER (
+        WHERE (
+          s2.or${w}_up_ts IS NOT NULL
+          AND (s2.or${w}_dn_ts IS NULL OR s2.or${w}_up_ts <= s2.or${w}_dn_ts)
+          AND b.ts > s2.or${w}_up_ts
+          AND b.low <= s1.or${w}_high
+        ) OR (
+          s2.or${w}_dn_ts IS NOT NULL
+          AND (s2.or${w}_up_ts IS NULL OR s2.or${w}_dn_ts < s2.or${w}_up_ts)
+          AND b.ts > s2.or${w}_dn_ts
+          AND b.high >= s1.or${w}_low
+        )
+      ) AS or${w}_retest_ts`,
+    )
+    .join(",");
+  await store.run(`
+    CREATE OR REPLACE TEMP TABLE _s2r AS
+    SELECT s1.trade_date, ${orRetestSelects}
+    FROM _s1 s1
+    JOIN _s2 s2 USING (trade_date)
+    JOIN bars b ON b.symbol = ${sym} AND b.tf = ${tf} AND b.ts >= s1.start_ts AND b.ts < s1.end_ts
+    GROUP BY s1.trade_date
+  `);
+
+  // S2c: excursions from the broken boundary after the first retest bar.\n  // The retest bar itself is excluded because OHLC cannot reveal whether its\n  // high/low printed before or after the boundary touch.
+  const orRetestExcursionSelects = windows
+    .map(
+      (w) => `
+      max(b.high) FILTER (WHERE s2r.or${w}_retest_ts IS NOT NULL AND b.ts > s2r.or${w}_retest_ts) AS or${w}_retest_post_high,
+      min(b.low) FILTER (WHERE s2r.or${w}_retest_ts IS NOT NULL AND b.ts > s2r.or${w}_retest_ts) AS or${w}_retest_post_low`,
+    )
+    .join(",");
+  await store.run(`
+    CREATE OR REPLACE TEMP TABLE _s2x AS
+    SELECT s1.trade_date, ${orRetestExcursionSelects}
+    FROM _s1 s1
+    JOIN _s2r s2r USING (trade_date)
+    JOIN bars b ON b.symbol = ${sym} AND b.tf = ${tf} AND b.ts >= s1.start_ts AND b.ts < s1.end_ts
+    GROUP BY s1.trade_date
+  `);
+
   const s1Rows = await store.all(`
-    SELECT s1.*, s2.* EXCLUDE (trade_date),
+    SELECT s1.*,
+      s2.* EXCLUDE (trade_date),
+      s2r.* EXCLUDE (trade_date),
+      s2x.* EXCLUDE (trade_date),
       CAST(s1.trade_date AS VARCHAR) AS trade_date_str
-    FROM _s1 s1 JOIN _s2 s2 USING (trade_date)
+    FROM _s1 s1
+    JOIN _s2 s2 USING (trade_date)
+    JOIN _s2r s2r USING (trade_date)
+    JOIN _s2x s2x USING (trade_date)
     ORDER BY s1.trade_date
   `);
 
@@ -244,6 +421,9 @@ async function deriveOne(
         dnTs: asNum(r[`or${w}_dn_ts`]),
         postHigh: asNum(r[`or${w}_post_high`]),
         postLow: asNum(r[`or${w}_post_low`]),
+        retestTs: asNum(r[`or${w}_retest_ts`]),
+        retestPostHigh: asNum(r[`or${w}_retest_post_high`]),
+        retestPostLow: asNum(r[`or${w}_retest_post_low`]),
       });
     }
     return {
@@ -472,6 +652,11 @@ async function deriveOne(
         row[`${p}break_min`] = null;
         row[`${p}false_break`] = null;
         row[`${p}broke_both`] = null;
+        row[`${p}retested`] = null;
+        row[`${p}retest_side`] = null;
+        row[`${p}retest_min`] = null;
+        row[`${p}retest_mfe_r`] = null;
+        row[`${p}retest_mae_r`] = null;
         row[`${p}ext_up_r`] = null;
         row[`${p}ext_dn_r`] = null;
         continue;
@@ -493,6 +678,23 @@ async function deriveOne(
       row[`${p}break_min`] = firstTs !== null ? Math.floor((firstTs - cur.startTs) / 60000) : null;
       row[`${p}false_break`] = falseBreak;
       row[`${p}broke_both`] = o.upTs !== null && o.dnTs !== null;
+      const retested = o.retestTs !== null && first !== "none";
+      row[`${p}retested`] = retested;
+      row[`${p}retest_side`] = retested ? first : null;
+      row[`${p}retest_min`] =
+        retested && o.retestTs !== null ? Math.floor((o.retestTs - cur.startTs) / 60000) : null;
+      row[`${p}retest_mfe_r`] =
+        !retested || range <= 0 || o.retestPostHigh === null || o.retestPostLow === null
+          ? null
+          : first === "up"
+            ? round(Math.max(0, o.retestPostHigh - o.high) / range, 6)
+            : round(Math.max(0, o.low - o.retestPostLow) / range, 6);
+      row[`${p}retest_mae_r`] =
+        !retested || range <= 0 || o.retestPostHigh === null || o.retestPostLow === null
+          ? null
+          : first === "up"
+            ? round(Math.max(0, o.high - o.retestPostLow) / range, 6)
+            : round(Math.max(0, o.retestPostHigh - o.low) / range, 6);
       row[`${p}ext_up_r`] =
         o.upTs !== null && o.postHigh !== null && range > 0
           ? round(Math.max(0, o.postHigh - o.high) / range, 6)
@@ -645,7 +847,7 @@ async function deriveOne(
     }
   }
   await store.run(
-    "DROP TABLE IF EXISTS _s1; DROP TABLE IF EXISTS _s2; DROP TABLE IF EXISTS _sess; DROP TABLE IF EXISTS _p",
+    "DROP TABLE IF EXISTS _s1; DROP TABLE IF EXISTS _s2; DROP TABLE IF EXISTS _s2r; DROP TABLE IF EXISTS _s2x; DROP TABLE IF EXISTS _sess; DROP TABLE IF EXISTS _p",
   );
   log(`derived ${out.length} sessions for ${symbol.symbol} ${sessionKey}`);
   return out.length;

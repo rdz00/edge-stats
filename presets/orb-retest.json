@@ -1,0 +1,30 @@
+{
+  "id": "orb-retest",
+  "version": 1,
+  "title": "Opening Range First Retest",
+  "category": "opening-range",
+  "summary": "Of sessions whose opening range first broke in the chosen direction, how often price later returned to the broken boundary. The breakout bar itself is excluded, so a wide break candle cannot count as its own retest.",
+  "outcome": "orbRetest({window}, {dir})",
+  "params": [
+    {
+      "name": "window",
+      "type": "duration",
+      "default": 5,
+      "doc": "Opening-range window in minutes.",
+      "target": "outcome"
+    },
+    {
+      "name": "dir",
+      "type": "enum",
+      "values": ["up", "down", "any"],
+      "default": "any",
+      "doc": "Direction of the first break.",
+      "target": "outcome"
+    }
+  ],
+  "deltas": [
+    "measures the first return to the broken OR boundary after the breakout bar",
+    "time-to-retest distribution attached to every run",
+    "compose with weekday, gap, event-day, and volatility conditions"
+  ]
+}

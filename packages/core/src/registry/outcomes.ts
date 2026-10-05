@@ -5,6 +5,22 @@ import { QueryError, requireWindow } from "./types";
 
 const DIRS = ["up", "down", "any"] as const;
 
+const REF_SESSIONS = ["london", "asia"] as const;
+const LEVEL_SIDES = ["high", "low"] as const;
+
+function refMetricCol(ref: string, side: string, metric: "mfe_r" | "mae_r"): string {
+  return `f.${ref}_${side}_${metric}`;
+}
+
+function refTouchedCol(ref: string, side: string): string {
+  return `f.${ref}_touched_${side}`;
+}
+
+function refTouchMinCol(ref: string, side: string): string {
+  return `f.${ref}_touch_${side}_min`;
+}
+
+
 function orCol(minutes: number, col: string): string {
   return `f.or${minutes}_${col}`;
 }
@@ -121,6 +137,66 @@ export const outcomes: OutcomeDef[] = [
   },
   {
     kind: "outcome",
+    name: "referenceLevelTouch",
+    title: "Reference-session level touch",
+    doc: "How often the target session reaches a completed London/Asia session high or low from the eligible side. The reference session must finish before the target session opens.",
+    args: [
+      { name: "ref", type: "enum", values: REF_SESSIONS, required: true, doc: "Reference session" },
+      { name: "side", type: "enum", values: LEVEL_SIDES, required: true, doc: "Reference high or low" },
+    ],
+    eligibility: (a) => {
+      const ref = String(a.ref);
+      const side = String(a.side);
+      return `f.${ref}_${side} IS NOT NULL`;
+    },
+    success: (a) => refTouchedCol(String(a.ref), String(a.side)),
+    value: {
+      sql: (a) => refTouchMinCol(String(a.ref), String(a.side)),
+      unit: "minutes",
+      doc: "Minutes from the target-session open to the first eligible touch.",
+    },
+    examples: ["referenceLevelTouch(london, low)", "referenceLevelTouch(asia, high)"],
+  },
+  {
+    kind: "outcome",
+    name: "referenceLevelMfeHit",
+    title: "Reference-session level favorable excursion hit",
+    doc: "Of eligible reference-level touches, how often price moved at least r reference-session ranges in the bounce direction after the touch bar. Highs measure downward favorable excursion; lows measure upward favorable excursion.",
+    args: [
+      { name: "ref", type: "enum", values: REF_SESSIONS, required: true, doc: "Reference session" },
+      { name: "side", type: "enum", values: LEVEL_SIDES, required: true, doc: "Reference high or low" },
+      { name: "r", type: "number", required: true, doc: "Target in reference-session range multiples" },
+    ],
+    eligibility: (a) => `${refTouchedCol(String(a.ref), String(a.side))} AND ${refMetricCol(String(a.ref), String(a.side), "mfe_r")} IS NOT NULL`,
+    success: (a) => `${refMetricCol(String(a.ref), String(a.side), "mfe_r")} >= ${sqlNum(a.r as number)}`,
+    value: {
+      sql: (a) => refMetricCol(String(a.ref), String(a.side), "mfe_r"),
+      unit: "r",
+      doc: "Post-touch favorable excursion in reference-session range multiples.",
+    },
+    examples: ["referenceLevelMfeHit(london, low, 0.5)", "referenceLevelMfeHit(asia, high, 1)"],
+  },
+  {
+    kind: "outcome",
+    name: "referenceLevelMaeHit",
+    title: "Reference-session level adverse excursion hit",
+    doc: "Of eligible reference-level touches, how often price moved at least r reference-session ranges through the level against the expected bounce direction after the touch bar.",
+    args: [
+      { name: "ref", type: "enum", values: REF_SESSIONS, required: true, doc: "Reference session" },
+      { name: "side", type: "enum", values: LEVEL_SIDES, required: true, doc: "Reference high or low" },
+      { name: "r", type: "number", required: true, doc: "Adverse threshold in reference-session range multiples" },
+    ],
+    eligibility: (a) => `${refTouchedCol(String(a.ref), String(a.side))} AND ${refMetricCol(String(a.ref), String(a.side), "mae_r")} IS NOT NULL`,
+    success: (a) => `${refMetricCol(String(a.ref), String(a.side), "mae_r")} >= ${sqlNum(a.r as number)}`,
+    value: {
+      sql: (a) => refMetricCol(String(a.ref), String(a.side), "mae_r"),
+      unit: "r",
+      doc: "Post-touch adverse excursion in reference-session range multiples.",
+    },
+    examples: ["referenceLevelMaeHit(london, low, 0.25)", "referenceLevelMaeHit(asia, high, 0.5)"],
+  },
+  {
+    kind: "outcome",
     name: "orbBreak",
     title: "Opening range break",
     doc: "Of the sessions with a formed opening range, how often the range broke in the given direction.",
@@ -142,6 +218,107 @@ export const outcomes: OutcomeDef[] = [
     },
     examples: ["orbBreak(15m, up)", "orbBreak(30m) WHERE gapUp"],
     library: [{ kind: "indicator", slug: "ultimate-opening-range-breakout" }],
+  },
+  {
+    kind: "outcome",
+    name: "orbRetest",
+    title: "Opening range first-break retest",
+    doc: "Of the sessions whose opening range first broke in the given direction, how often price later returned to the broken boundary. The breakout bar itself is excluded from retest detection.",
+    args: [
+      { name: "window", type: "duration", required: true, doc: "Opening-range window" },
+      {
+        name: "dir",
+        type: "enum",
+        values: DIRS,
+        default: "any",
+        doc: "Direction of the first break",
+      },
+    ],
+    eligibility: (a, ctx) => {
+      const w = requireWindow(a.window as number, ctx);
+      const dir = a.dir as string;
+      if (dir === "any") return `${orCol(w, "first_break")} IN ('up', 'down')`;
+      return `${orCol(w, "first_break")} = '${dir}'`;
+    },
+    success: (a, ctx) => `${orCol(requireWindow(a.window as number, ctx), "retested")}`,
+    value: {
+      sql: (a, ctx) => orCol(requireWindow(a.window as number, ctx), "retest_min"),
+      unit: "minutes",
+      doc: "Minutes from the session open to the first retest, among sessions that retested.",
+    },
+    examples: ["orbRetest(5m, up)", "orbRetest(15m) WHERE NOT eventDay('FOMC')"],
+  },
+  {
+    kind: "outcome",
+    name: "orbRetestMfeHit",
+    title: "Opening range retest favorable excursion hit",
+    doc: "Of opening-range breakouts that produced a first retest, how often post-retest favorable excursion reached at least r opening-range widths from the broken boundary.",
+    args: [
+      { name: "window", type: "duration", required: true, doc: "Opening-range window" },
+      {
+        name: "r",
+        type: "number",
+        required: true,
+        doc: "Favorable excursion target in opening-range multiples",
+      },
+      {
+        name: "dir",
+        type: "enum",
+        values: DIRS,
+        default: "any",
+        doc: "Direction of the first break / retest",
+      },
+    ],
+    eligibility: (a, ctx) => {
+      const w = requireWindow(a.window as number, ctx);
+      const dir = a.dir as string;
+      if (dir === "any") return `${orCol(w, "retested")} AND ${orCol(w, "retest_mfe_r")} IS NOT NULL`;
+      return `${orCol(w, "retested")} AND ${orCol(w, "retest_side")} = '${dir}' AND ${orCol(w, "retest_mfe_r")} IS NOT NULL`;
+    },
+    success: (a, ctx) =>
+      `${orCol(requireWindow(a.window as number, ctx), "retest_mfe_r")} >= ${sqlNum(a.r as number)}`,
+    value: {
+      sql: (a, ctx) => orCol(requireWindow(a.window as number, ctx), "retest_mfe_r"),
+      unit: "r",
+      doc: "Post-retest favorable excursion in opening-range multiples.",
+    },
+    examples: ["orbRetestMfeHit(5m, 0.5, up)", "orbRetestMfeHit(5m, 1)"],
+  },
+  {
+    kind: "outcome",
+    name: "orbRetestMaeHit",
+    title: "Opening range retest adverse excursion hit",
+    doc: "Of opening-range breakouts that produced a first retest, how often post-retest adverse excursion reached at least r opening-range widths against the breakout direction.",
+    args: [
+      { name: "window", type: "duration", required: true, doc: "Opening-range window" },
+      {
+        name: "r",
+        type: "number",
+        required: true,
+        doc: "Adverse excursion threshold in opening-range multiples",
+      },
+      {
+        name: "dir",
+        type: "enum",
+        values: DIRS,
+        default: "any",
+        doc: "Direction of the first break / retest",
+      },
+    ],
+    eligibility: (a, ctx) => {
+      const w = requireWindow(a.window as number, ctx);
+      const dir = a.dir as string;
+      if (dir === "any") return `${orCol(w, "retested")} AND ${orCol(w, "retest_mae_r")} IS NOT NULL`;
+      return `${orCol(w, "retested")} AND ${orCol(w, "retest_side")} = '${dir}' AND ${orCol(w, "retest_mae_r")} IS NOT NULL`;
+    },
+    success: (a, ctx) =>
+      `${orCol(requireWindow(a.window as number, ctx), "retest_mae_r")} >= ${sqlNum(a.r as number)}`,
+    value: {
+      sql: (a, ctx) => orCol(requireWindow(a.window as number, ctx), "retest_mae_r"),
+      unit: "r",
+      doc: "Post-retest adverse excursion in opening-range multiples.",
+    },
+    examples: ["orbRetestMaeHit(5m, 0.25, up)", "orbRetestMaeHit(5m, 0.5)"],
   },
   {
     kind: "outcome",

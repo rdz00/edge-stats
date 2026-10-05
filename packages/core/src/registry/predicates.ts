@@ -4,6 +4,10 @@ import { requireWindow } from "./types";
 
 const DIRS = ["up", "down", "any"] as const;
 
+const REF_SESSIONS = ["london", "asia"] as const;
+const LEVEL_SIDES = ["high", "low"] as const;
+
+
 function orCol(minutes: number, col: string): string {
   return `f.or${minutes}_${col}`;
 }
@@ -36,6 +40,18 @@ export const predicates: PredicateDef[] = [
   },
   {
     kind: "predicate",
+    name: "referenceLevelTouched",
+    title: "Reference-session level touched",
+    doc: "The target session touched the selected London/Asia high or low after that reference session had fully completed. Highs are only eligible when the target opened at or below the high; lows only when it opened at or above the low.",
+    args: [
+      { name: "ref", type: "enum", values: REF_SESSIONS, required: true, doc: "Reference session" },
+      { name: "side", type: "enum", values: LEVEL_SIDES, required: true, doc: "Reference high or low" },
+    ],
+    sql: (a) => `f.${String(a.ref)}_touched_${String(a.side)}`,
+    examples: ["closeGreen WHERE referenceLevelTouched(london, low)"],
+  },
+  {
+    kind: "predicate",
     name: "orbBroke",
     title: "Opening range broke",
     doc: "The session broke its opening range (first n minutes) in the given direction after the range formed.",
@@ -51,6 +67,30 @@ export const predicates: PredicateDef[] = [
     },
     examples: ["closeGreen WHERE orbBroke(15m, up)"],
     library: [{ kind: "indicator", slug: "ultimate-opening-range-breakout" }],
+  },
+  {
+    kind: "predicate",
+    name: "orbRetested",
+    title: "Opening range first break retested",
+    doc: "The first side that broke the opening range was later revisited at its broken boundary. The breakout bar itself cannot count as the retest.",
+    args: [
+      { name: "window", type: "duration", required: true, doc: "Opening-range window, e.g. 5m" },
+      {
+        name: "dir",
+        type: "enum",
+        values: DIRS,
+        default: "any",
+        doc: "Direction of the first break / retest",
+      },
+    ],
+    sql: (a, ctx) => {
+      const w = requireWindow(a.window as number, ctx);
+      const dir = a.dir as string;
+      const side = orCol(w, "retest_side");
+      if (dir === "any") return `${orCol(w, "retested")} AND ${side} IN ('up', 'down')`;
+      return `${orCol(w, "retested")} AND ${side} = ${sqlStr(dir)}`;
+    },
+    examples: ["orbTargetHit(5m, 1, up) WHERE orbRetested(5m, up)"],
   },
   {
     kind: "predicate",
