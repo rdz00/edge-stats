@@ -54,6 +54,30 @@ export const predicates: PredicateDef[] = [
   },
   {
     kind: "predicate",
+    name: "orbRetested",
+    title: "Opening range first break retested",
+    doc: "The first side that broke the opening range was later revisited at its broken boundary. The breakout bar itself cannot count as the retest.",
+    args: [
+      { name: "window", type: "duration", required: true, doc: "Opening-range window, e.g. 5m" },
+      {
+        name: "dir",
+        type: "enum",
+        values: DIRS,
+        default: "any",
+        doc: "Direction of the first break / retest",
+      },
+    ],
+    sql: (a, ctx) => {
+      const w = requireWindow(a.window as number, ctx);
+      const dir = a.dir as string;
+      const side = orCol(w, "retest_side");
+      if (dir === "any") return `${orCol(w, "retested")} AND ${side} IN ('up', 'down')`;
+      return `${orCol(w, "retested")} AND ${side} = ${sqlStr(dir)}`;
+    },
+    examples: ["orbTargetHit(5m, 1, up) WHERE orbRetested(5m, up)"],
+  },
+  {
+    kind: "predicate",
     name: "orbFalseBroke",
     title: "Opening range false break (condition)",
     doc: "The first opening-range break failed: price closed back inside the range (or beyond the opposite side). Condition form of the orbFalseBreak outcome.",
