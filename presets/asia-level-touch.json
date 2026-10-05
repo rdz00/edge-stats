@@ -1,0 +1,23 @@
+{
+  "id": "asia-level-touch",
+  "version": 1,
+  "title": "Asia Level Touch",
+  "category": "levels",
+  "summary": "How often the target session reaches the completed asia session high or low from the eligible side. The reference session must finish before the target session opens, preventing lookahead.",
+  "outcome": "referenceLevelTouch(asia, {side})",
+  "params": [
+    {
+      "name": "side",
+      "type": "enum",
+      "values": ["high", "low"],
+      "default": "low",
+      "doc": "Reference-session high or low.",
+      "target": "outcome"
+    }
+  ],
+  "deltas": [
+    "reference session must complete before the target opens",
+    "first-touch timing distribution included",
+    "pair with referenceLevelMfeHit/referenceLevelMaeHit for bounce quality"
+  ]
+}
