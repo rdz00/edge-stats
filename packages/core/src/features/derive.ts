@@ -258,12 +258,12 @@ async function deriveOne(
     GROUP BY s1.trade_date
   `);
 
-  // S2c: excursions from the broken boundary after the first retest.
+  // S2c: excursions from the broken boundary after the first retest bar.\n  // The retest bar itself is excluded because OHLC cannot reveal whether its\n  // high/low printed before or after the boundary touch.
   const orRetestExcursionSelects = windows
     .map(
       (w) => `
-      max(b.high) FILTER (WHERE s2r.or${w}_retest_ts IS NOT NULL AND b.ts >= s2r.or${w}_retest_ts) AS or${w}_retest_post_high,
-      min(b.low) FILTER (WHERE s2r.or${w}_retest_ts IS NOT NULL AND b.ts >= s2r.or${w}_retest_ts) AS or${w}_retest_post_low`,
+      max(b.high) FILTER (WHERE s2r.or${w}_retest_ts IS NOT NULL AND b.ts > s2r.or${w}_retest_ts) AS or${w}_retest_post_high,
+      min(b.low) FILTER (WHERE s2r.or${w}_retest_ts IS NOT NULL AND b.ts > s2r.or${w}_retest_ts) AS or${w}_retest_post_low`,
     )
     .join(",");
   await store.run(`
