@@ -210,6 +210,42 @@ export const outcomes: OutcomeDef[] = [
   },
   {
     kind: "outcome",
+    name: "orbRetestMaeHit",
+    title: "Opening range retest adverse excursion hit",
+    doc: "Of opening-range breakouts that produced a first retest, how often post-retest adverse excursion reached at least r opening-range widths against the breakout direction.",
+    args: [
+      { name: "window", type: "duration", required: true, doc: "Opening-range window" },
+      {
+        name: "r",
+        type: "number",
+        required: true,
+        doc: "Adverse excursion threshold in opening-range multiples",
+      },
+      {
+        name: "dir",
+        type: "enum",
+        values: DIRS,
+        default: "any",
+        doc: "Direction of the first break / retest",
+      },
+    ],
+    eligibility: (a, ctx) => {
+      const w = requireWindow(a.window as number, ctx);
+      const dir = a.dir as string;
+      if (dir === "any") return `${orCol(w, "retested")} AND ${orCol(w, "retest_mae_r")} IS NOT NULL`;
+      return `${orCol(w, "retested")} AND ${orCol(w, "retest_side")} = '${dir}' AND ${orCol(w, "retest_mae_r")} IS NOT NULL`;
+    },
+    success: (a, ctx) =>
+      `${orCol(requireWindow(a.window as number, ctx), "retest_mae_r")} >= ${sqlNum(a.r as number)}`,
+    value: {
+      sql: (a, ctx) => orCol(requireWindow(a.window as number, ctx), "retest_mae_r"),
+      unit: "r",
+      doc: "Post-retest adverse excursion in opening-range multiples.",
+    },
+    examples: ["orbRetestMaeHit(5m, 0.25, up)", "orbRetestMaeHit(5m, 0.5)"],
+  },
+  {
+    kind: "outcome",
     name: "orbFalseBreak",
     title: "Opening range false break",
     doc: "Of the sessions whose opening range first broke in the given direction, how often that break failed (closed back inside the range or beyond the opposite side).",
