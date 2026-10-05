@@ -25,7 +25,7 @@ import { randomUUID } from "node:crypto";
 import { DateTime } from "luxon";
 import type { SessionResolver } from "../calendar";
 import type { EdgeStatsConfig, SymbolConfig } from "../config";
-import { parseTfMs } from "../config";
+import { defaultSessionKey, parseTfMs } from "../config";
 import { derivableSessionKeys } from "../calendar/sessions";
 import type { Store } from "../store/store";
 import { sqlNum, sqlPath, sqlStr } from "../util/sql";
@@ -135,8 +135,130 @@ export async function deriveFeatures(
       const count = await deriveOne(store, symbol, sessionKey, windows, resolver, log);
       summaries.push({ symbol: symbol.symbol, sessionKey, sessions: count });
     }
+    await deriveReferenceSessionLevels(store, symbol, log);
   }
   return summaries;
+}
+
+async function deriveReferenceSessionLevels(
+  store: Store,
+  symbol: SymbolConfig,
+  log: (msg: string) => void,
+): Promise<void> {
+  const targetSession = defaultSessionKey(symbol);
+  const sessionKeys = new Set(derivableSessionKeys(symbol));
+  const refs = ["london", "asia"] as const;
+  const sym = sqlStr(symbol.symbol);
+  const tf = sqlStr(symbol.tf);
+
+  for (const ref of refs) {
+    if (!sessionKeys.has(ref) || !sessionKeys.has(targetSession) || ref === targetSession) continue;
+
+    const prefix = ref;
+    await store.run(`
+      CREATE OR REPLACE TEMP TABLE _ref_base AS
+      SELECT t.trade_date,
+        t.start_ts AS target_start_ts,
+        t.end_ts AS target_end_ts,
+        t.open AS target_open,
+        r.high AS ref_high,
+        r.low AS ref_low,
+        (r.high - r.low) AS ref_range
+      FROM session_features t
+      JOIN session_features r
+        ON r.symbol = t.symbol
+       AND r.trade_date = t.trade_date
+       AND r.session_key = ${sqlStr(ref)}
+      WHERE t.symbol = ${sym}
+        AND t.session_key = ${sqlStr(targetSession)}
+        AND t.complete
+        AND r.complete
+        AND r.end_ts <= t.start_ts
+        AND r.high IS NOT NULL
+        AND r.low IS NOT NULL
+        AND r.high > r.low
+    `);
+
+    await store.run(`
+      CREATE OR REPLACE TEMP TABLE _ref_touch AS
+      SELECT rb.*,
+        min(b.ts) FILTER (
+          WHERE rb.target_open <= rb.ref_high AND b.high >= rb.ref_high
+        ) AS high_touch_ts,
+        min(b.ts) FILTER (
+          WHERE rb.target_open >= rb.ref_low AND b.low <= rb.ref_low
+        ) AS low_touch_ts
+      FROM _ref_base rb
+      JOIN bars b
+        ON b.symbol = ${sym}
+       AND b.tf = ${tf}
+       AND b.ts >= rb.target_start_ts
+       AND b.ts < rb.target_end_ts
+      GROUP BY rb.trade_date, rb.target_start_ts, rb.target_end_ts, rb.target_open,
+               rb.ref_high, rb.ref_low, rb.ref_range
+    `);
+
+    // Start excursions on the bar AFTER the touch bar to avoid intrabar
+    // sequencing assumptions inside a 1-minute OHLC candle.
+    await store.run(`
+      CREATE OR REPLACE TEMP TABLE _ref_exc AS
+      SELECT rt.trade_date,
+        max(b.high) FILTER (WHERE rt.high_touch_ts IS NOT NULL AND b.ts > rt.high_touch_ts) AS high_post_high,
+        min(b.low) FILTER (WHERE rt.high_touch_ts IS NOT NULL AND b.ts > rt.high_touch_ts) AS high_post_low,
+        max(b.high) FILTER (WHERE rt.low_touch_ts IS NOT NULL AND b.ts > rt.low_touch_ts) AS low_post_high,
+        min(b.low) FILTER (WHERE rt.low_touch_ts IS NOT NULL AND b.ts > rt.low_touch_ts) AS low_post_low
+      FROM _ref_touch rt
+      JOIN bars b
+        ON b.symbol = ${sym}
+       AND b.tf = ${tf}
+       AND b.ts >= rt.target_start_ts
+       AND b.ts < rt.target_end_ts
+      GROUP BY rt.trade_date
+    `);
+
+    await store.run(`
+      UPDATE session_features AS f
+      SET ${prefix}_high = rt.ref_high,
+          ${prefix}_low = rt.ref_low,
+          ${prefix}_range = rt.ref_range,
+          ${prefix}_touched_high = rt.high_touch_ts IS NOT NULL,
+          ${prefix}_touch_high_min = CASE
+            WHEN rt.high_touch_ts IS NULL THEN NULL
+            ELSE floor((rt.high_touch_ts - rt.target_start_ts) / 60000)::INT
+          END,
+          ${prefix}_high_mfe_r = CASE
+            WHEN rt.high_touch_ts IS NULL OR re.high_post_low IS NULL THEN NULL
+            ELSE round(greatest(0, rt.ref_high - re.high_post_low) / rt.ref_range, 6)
+          END,
+          ${prefix}_high_mae_r = CASE
+            WHEN rt.high_touch_ts IS NULL OR re.high_post_high IS NULL THEN NULL
+            ELSE round(greatest(0, re.high_post_high - rt.ref_high) / rt.ref_range, 6)
+          END,
+          ${prefix}_touched_low = rt.low_touch_ts IS NOT NULL,
+          ${prefix}_touch_low_min = CASE
+            WHEN rt.low_touch_ts IS NULL THEN NULL
+            ELSE floor((rt.low_touch_ts - rt.target_start_ts) / 60000)::INT
+          END,
+          ${prefix}_low_mfe_r = CASE
+            WHEN rt.low_touch_ts IS NULL OR re.low_post_high IS NULL THEN NULL
+            ELSE round(greatest(0, re.low_post_high - rt.ref_low) / rt.ref_range, 6)
+          END,
+          ${prefix}_low_mae_r = CASE
+            WHEN rt.low_touch_ts IS NULL OR re.low_post_low IS NULL THEN NULL
+            ELSE round(greatest(0, rt.ref_low - re.low_post_low) / rt.ref_range, 6)
+          END
+      FROM _ref_touch rt
+      LEFT JOIN _ref_exc re USING (trade_date)
+      WHERE f.symbol = ${sym}
+        AND f.session_key = ${sqlStr(targetSession)}
+        AND f.trade_date = rt.trade_date
+    `);
+
+    await store.run(
+      "DROP TABLE IF EXISTS _ref_base; DROP TABLE IF EXISTS _ref_touch; DROP TABLE IF EXISTS _ref_exc",
+    );
+    log(`derived ${ref} reference levels for ${symbol.symbol} ${targetSession}`);
+  }
 }
 
 async function deriveOne(
